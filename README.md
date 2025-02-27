@@ -1,93 +1,133 @@
-# 🖼️ NFT Royalty Marketplace Implementation
+# NFT Royalty Marketplace
+
+A Clarity smart contract for the Stacks blockchain that implements a decentralized marketplace for NFTs with built-in royalty enforcement.
 
 ## Overview
 
-This PR introduces a comprehensive NFT marketplace smart contract for the Stacks blockchain that enforces royalty payments to creators. The implementation provides a complete solution for listing, buying, selling, and making offers on NFTs while ensuring original creators receive their fair share of secondary sales.
+The NFT Royalty Marketplace is a decentralized platform where users can list, buy, and sell NFTs with automatic royalty payments to original creators. The marketplace ensures that creators receive their fair share of secondary sales while providing a secure and efficient trading environment.
 
 ## Features
 
-- ✅ Collection registration with configurable royalty rates
-- ✅ NFT listing management with expiration and price updates
-- ✅ Direct purchase functionality with automatic fee distribution
-- ✅ Offer system for negotiated sales
-- ✅ Comprehensive sales history tracking
-- ✅ Collection verification system
-- ✅ Admin functions for marketplace management
-- ✅ SIP-009 NFT standard compatibility
+- **Collection Registration**: Register NFT collections with customizable royalty rates
+- **Listing Management**: List, update, and cancel NFT listings
+- **Secure Transactions**: Purchase NFTs with automatic distribution of funds
+- **Royalty Enforcement**: Automatically enforce royalty payments to creators
+- **Offer System**: Make and accept offers on any NFT
+- **Sales History**: Track all sales with complete transaction details
+- **Verification System**: Verified collections for improved trust
+- **Marketplace Fee**: Sustainable business model with configurable marketplace fees
 
-## Implementation Details
+## Contract Architecture
 
-The implementation is divided into 4 logical commits:
+The contract is divided into 4 logical components:
 
-### Commit 1: Initial Setup with Constants and Core Data Structures
+1. **Initial Setup (Data Structures)**: Core data structures and constants
+2. **Helper Functions & Collection Management**: Utility functions and collection registration
+3. **Listing Management & Purchase Functions**: NFT listing and buying functionality
+4. **Offers, Admin Functions & Read Methods**: Offer system, administration, and read-only functions
 
-- Defined comprehensive error codes for better error handling
-- Implemented core data structures for collections, listings, offers, and sales history
-- Established contract parameters for fees, royalties, and ownership
-- Set up the marketplace foundation with clear constants and variables
+## Key Data Structures
 
-### Commit 2: Helper Functions and Collection Management
+- `collections`: Stores NFT collection information including creator and royalty rates
+- `listings`: Tracks active NFT listings with price and expiry
+- `offers`: Manages offers made on NFTs
+- `sales-history`: Records all completed transactions
+- `sales-counter`: Tracks the number of sales per NFT
 
-- Added NFT trait definitions for contract interoperability
-- Implemented helper functions for fee calculations and permissions
-- Created collection registration and management functionality
-- Added verification system for trusted collections
-- Implemented royalty rate management for creators
+## Roles
 
-### Commit 3: Listing Management and Purchase Functions
+- **Owner**: The contract deployer with administrative privileges
+- **Collection Creators**: NFT collection creators who receive royalties
+- **Sellers**: Users who list NFTs for sale
+- **Buyers**: Users who purchase NFTs or make offers
 
-- Built complete listing lifecycle (create, update, cancel)
-- Implemented secure purchase functionality with automatic fund distribution
-- Added royalty enforcement for secondary sales
-- Created sales history recording system
-- Implemented robust transaction validation
+## How to Use
 
-### Commit 4: Offers, Admin Functions and Read-Only Methods
+### For Collection Creators
 
-- Added comprehensive offer system (make, cancel, accept)
-- Implemented administrative functions for marketplace management
-- Created read-only functions for querying contract state
-- Added contract pause functionality for emergencies
-- Provided methods for marketplace fee configuration
+```clarity
+;; Register your NFT collection
+(contract-call? .nft-marketplace register-collection 
+  'SP2C2YFP12AJZB4MABJBAJ55XECVS7E4PMMZ89YZR.my-nfts 
+  "My Amazing NFTs" 
+  u50)  ;; 5% royalty
+```
 
-## Technical Considerations
+### For Sellers
 
-- **Security**: Implemented proper access control and transaction validation
-- **Interoperability**: Compatible with SIP-009 NFT standard
-- **Clarity Best Practices**: Used idiomatic Clarity patterns and error handling
-- **Gas Efficiency**: Optimized data structures and minimized state changes
-- **User Experience**: Flexible expiry options and offer management
+```clarity
+;; List your NFT for sale
+(contract-call? .nft-marketplace list-nft 
+  'SP2C2YFP12AJZB4MABJBAJ55XECVS7E4PMMZ89YZR.my-nfts 
+  u1  ;; token ID
+  u1000000000  ;; price (1000 STX)
+  (some u10000))  ;; expiry block height
+```
 
-## Testing
+### For Buyers
 
-The contract has been tested with the following scenarios:
-- Collection registration and verification
-- NFT listing lifecycle (create, update, cancel)
-- Purchase flow with fee distribution
-- Offer creation, cancellation, and acceptance
-- Administrative functions and access control
-- Edge cases (expired listings, insufficient funds, etc.)
+```clarity
+;; Purchase an NFT
+(contract-call? .nft-marketplace purchase-nft 
+  'SP2C2YFP12AJZB4MABJBAJ55XECVS7E4PMMZ89YZR.my-nfts 
+  u1)  ;; token ID
 
-## Future Work
+;; Make an offer
+(contract-call? .nft-marketplace make-offer
+  'SP2C2YFP12AJZB4MABJBAJ55XECVS7E4PMMZ89YZR.my-nfts
+  u1  ;; token ID
+  u900000000  ;; offer amount (900 STX)
+  none)  ;; default expiry
+```
 
-While this PR provides a complete marketplace implementation, future enhancements could include:
+## Testing with Clarinet
+
+1. Initialize a new project:
+   ```
+   clarinet new nft-marketplace && cd nft-marketplace
+   ```
+
+2. Add the contract to your project:
+   ```
+   clarinet contract new nft-marketplace
+   ```
+
+3. Copy the contract code into the generated file
+
+4. Create test NFT contracts for testing:
+   ```
+   clarinet contract new test-nft
+   ```
+
+5. Run tests:
+   ```
+   clarinet test
+   ```
+
+## Security Considerations
+
+- **Access Control**: Role-based permissions for administrative functions
+- **Fee Limits**: Built-in limits on royalty rates and marketplace fees
+- **Transaction Safety**: Secure transfer patterns with error handling
+- **Expiry System**: All listings and offers have expiration dates
+- **Pausable**: Emergency pause function for the entire marketplace
+
+## Roadmap
+
+- Multi-token sales (bundles)
 - Auction system with timed bidding
-- Multi-token bundle sales
-- Cross-collection trading with different royalty schemes
+- Cross-chain NFT support
 - DAO governance for marketplace parameters
-- Non-STX payment options
+- Integration with external price oracles for non-STX payments
 
-## Related Issues
+## License
 
-Closes #234: Implement NFT marketplace with royalty enforcement
-Addresses #345: Create secondary sales tracking system
+MIT License
 
-## Documentation
+## Contact
 
-A comprehensive README.md has been added with:
-- Feature description and architecture overview
-- Usage examples for different user roles
-- Testing instructions and security considerations
-- Roadmap for future enhancements
+For questions or contributions, please open an issue on the GitHub repository.
 
 ---
+
+*This contract is provided as-is without any guarantees or warranty. Use at your own risk.*
