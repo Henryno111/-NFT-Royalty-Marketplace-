@@ -96,3 +96,374 @@
   { index: uint }
   { contract-address: principal }
 )
+;; NFT Trait for interfacing with NFT contracts
+(define-trait nft-trait
+  (
+    ;; Transfer from the sender to a new principal
+    (transfer (uint principal principal) (response bool uint))
+    ;; Get the owner of a token ID
+    (get-owner (uint) (response (optional principal) uint))
+    ;; Get the last token ID
+    (get-last-token-id () (response uint uint))
+    ;; Get the token URI
+    (get-token-uri (uint) (response (optional (string-utf8 256)) uint))
+  )
+)
+
+;; SIP-009 NFT trait for compatibility
+(define-trait sip009-nft-trait
+  (
+    ;; Transfer from the sender to a new principal
+    (transfer (uint principal principal) (response bool uint))
+    ;; Get the owner of a token ID
+    (get-owner (uint) (response (optional principal) uint))
+    ;; Get the last token ID
+    (get-last-token-id () (response uint uint))
+    ;; Get the token URI
+    (get-token-uri (uint) (response (optional (string-utf8 256)) uint))
+  )
+)
+
+;; Event definitions
+(define-trait marketplace-event-trait
+  (
+    (collection-registered (principal (string-ascii 64) principal uint) (response bool uint))
+    (nft-listed (principal uint principal uint uint) (response bool uint))
+    (nft-unlisted (principal uint principal) (response bool uint))
+    (nft-sold (principal uint principal principal uint) (response bool uint))
+    (offer-made (principal uint principal uint uint) (response bool uint))
+    (offer-cancelled (principal uint principal) (response bool uint))
+    (offer-accepted (principal uint principal principal uint) (response bool uint))
+  )
+)
+
+;; Helper functions
+
+;; Check if caller is contract owner
+(define-private (is-owner)
+  (is-eq tx-sender (var-get contract-owner))
+)
+
+;; Check if contract is paused
+(define-private (is-paused)
+  (var-get paused)
+)
+
+;; Check if a collection is registered
+(define-private (is-registered (contract-address principal))
+  (is-some (map-get? collections { contract-address: contract-address }))
+)
+
+;; Check if caller is the collection creator
+(define-private (is-collection-creator (contract-address principal))
+  (match (map-get? collections { contract-address: contract-address })
+    collection (is-eq tx-sender (get creator collection))
+    false
+  )
+)
+
+;; Calculate marketplace fee
+(define-private (calculate-marketplace-fee (price uint))
+  (/ (* price (var-get marketplace-fee)) MARKETPLACE-FEE-DENOMINATOR)
+)
+
+;; Calculate royalty fee
+(define-private (calculate-royalty-fee (contract-address principal) (price uint))
+  (match (map-get? collections { contract-address: contract-address })
+    collection (/ (* price (get royalty-rate collection)) MARKETPLACE-FEE-DENOMINATOR)
+    u0
+  )
+)
+
+;; Get sales count for an NFT
+(define-private (get-sales-count (contract-address principal) (token-id uint))
+  (default-to 
+    u0
+    (get count (map-get? sales-counter { contract-address: contract-address, token-id: token-id }))
+  )
+)
+
+;; Increment sales count for an NFT
+(define-private (increment-sales-count (contract-address principal) (token-id uint))
+  (let ((current-count (get-sales-count contract-address token-id)))
+    (map-set sales-counter
+      { contract-address: contract-address, token-id: token-id }
+      { count: (+ u1 current-count) }
+    )
+    (+ u1 current-count)
+  )
+)
+
+;; Collection Management Functions
+
+;; Register a new NFT collection
+(define-public (register-collection (contract-address principal) (name (string-ascii 64)) (royalty-rate uint))
+  (begin
+    ;; Check if caller is the contract owner or if we're allowing public registration
+    (asserts! (or (is-owner) true) ERR-NOT-AUTHORIZED)
+    
+    ;; Check if collection is already registered
+    (asserts! (not (is-registered contract-address)) ERR-COLLECTION-ALREADY-REGISTERED)
+    
+    ;; Check if royalty rate is valid
+    (asserts! (<= royalty-rate MAX-ROYALTY) ERR-INVALID-ROYALTY)
+    
+    ;; Register collection
+    (map-set collections
+      { contract-address: contract-address }
+      {
+        name: name,
+        creator: tx-sender,
+        royalty-rate: royalty-rate,
+        verified: (is-owner),  ;; Only verify if registered by owner
+        registered-by: tx-sender,
+        registration-height: block-height
+      }
+    )
+    
+    ;; Add to registry
+    (let ((current-count (var-get collection-count)))
+      (map-set registered-collections
+        { index: current-count }
+        { contract-address: contract-address }
+      )
+      (var-set collection-count (+ u1 current-count))
+    )
+    
+    ;; Print event
+    (print { event: "collection-registered", contract: contract-address, name: name, creator: tx-sender, royalty: royalty-rate })
+    (ok true)
+  )
+)
+
+;; Verify a collection (only contract owner)
+(define-public (verify-collection (contract-address principal))
+  (begin
+    ;; Check if caller is the contract owner
+    (asserts! (is-owner) ERR-NOT-AUTHORIZED)
+    
+    ;; Check if collection is registered
+    (asserts! (is-registered contract-address) ERR-COLLECTION-NOT-REGISTERED)
+    
+    ;; Update verification status
+    (match (map-get? collections { contract-address: contract-address })
+      collection
+      (map-set collections
+        { contract-address: contract-address }
+        (merge collection { verified: true })
+      )
+      ERR-COLLECTION-NOT-REGISTERED
+    )
+    
+    (ok true)
+  )
+)
+
+;; Update collection royalty rate (only collection creator)
+(define-public (update-royalty-rate (contract-address principal) (new-royalty-rate uint))
+  (begin
+    ;; Check if collection is registered
+    (asserts! (is-registered contract-address) ERR-COLLECTION-NOT-REGISTERED)
+    
+    ;; Check if caller is collection creator
+    (asserts! (is-collection-creator contract-address) ERR-NOT-AUTHORIZED)
+    
+    ;; Check if royalty rate is valid
+    (asserts! (<= new-royalty-rate MAX-ROYALTY) ERR-INVALID-ROYALTY)
+    
+    ;; Update royalty rate
+    (match (map-get? collections { contract-address: contract-address })
+      collection
+      (map-set collections
+        { contract-address: contract-address }
+        (merge collection { royalty-rate: new-royalty-rate })
+      )
+      ERR-COLLECTION-NOT-REGISTERED
+    )
+    
+    (ok true)
+  )
+)
+;; Listing Management Functions
+
+;; List an NFT for sale
+(define-public (list-nft (nft-contract <nft-trait>) (token-id uint) (price uint) (expiry (optional uint)))
+  (let (
+    (contract-address (contract-of nft-contract))
+    (owner (unwrap! (contract-call? nft-contract get-owner token-id) ERR-NFT-TRANSFER-FAILED))
+    (expire-at (default-to (+ block-height DEFAULT-EXPIRY) expiry))
+  )
+    ;; Check if contract is not paused
+    (asserts! (not (is-paused)) ERR-LISTING-NOT-ACTIVE)
+    
+    ;; Check if caller is the owner of the NFT
+    (asserts! (is-eq tx-sender (unwrap! owner ERR-NOT-OWNER)) ERR-NOT-OWNER)
+    
+    ;; Check if price is valid
+    (asserts! (> price u0) ERR-INVALID-PRICE)
+    
+    ;; Check if expiry is valid
+    (asserts! (> expire-at block-height) ERR-INVALID-EXPIRY)
+    
+    ;; Check if NFT is not already listed
+    (asserts! (is-none (map-get? listings { contract-address: contract-address, token-id: token-id })) ERR-NFT-ALREADY-LISTED)
+    
+    ;; Create listing
+    (map-set listings
+      { contract-address: contract-address, token-id: token-id }
+      {
+        owner: tx-sender,
+        price: price,
+        expiry: expire-at,
+        active: true,
+        listed-at: block-height
+      }
+    )
+    
+    ;; Print event
+    (print { event: "nft-listed", contract: contract-address, token-id: token-id, owner: tx-sender, price: price, expiry: expire-at })
+    (ok true)
+  )
+)
+
+;; Update an NFT listing
+(define-public (update-listing (nft-contract <nft-trait>) (token-id uint) (new-price uint) (new-expiry (optional uint)))
+  (let (
+    (contract-address (contract-of nft-contract))
+    (expire-at (default-to (+ block-height DEFAULT-EXPIRY) new-expiry))
+  )
+    ;; Check if contract is not paused
+    (asserts! (not (is-paused)) ERR-LISTING-NOT-ACTIVE)
+    
+    ;; Check if NFT is listed
+    (match (map-get? listings { contract-address: contract-address, token-id: token-id })
+      listing
+      (begin
+        ;; Check if caller is the owner of the listing
+        (asserts! (is-eq tx-sender (get owner listing)) ERR-NOT-OWNER)
+        
+        ;; Check if listing is active
+        (asserts! (get active listing) ERR-LISTING-NOT-ACTIVE)
+        
+        ;; Check if listing has not expired
+        (asserts! (<= block-height (get expiry listing)) ERR-LISTING-EXPIRED)
+        
+        ;; Check if price is valid
+        (asserts! (> new-price u0) ERR-INVALID-PRICE)
+        
+        ;; Check if expiry is valid
+        (asserts! (> expire-at block-height) ERR-INVALID-EXPIRY)
+        
+        ;; Update listing
+        (map-set listings
+          { contract-address: contract-address, token-id: token-id }
+          (merge listing { 
+            price: new-price,
+            expiry: expire-at
+          })
+        )
+        
+        (ok true)
+      )
+      ERR-NFT-NOT-LISTED
+    )
+  )
+)
+
+;; Cancel an NFT listing
+(define-public (cancel-listing (nft-contract <nft-trait>) (token-id uint))
+  (let (
+    (contract-address (contract-of nft-contract))
+  )
+    ;; Check if NFT is listed
+    (match (map-get? listings { contract-address: contract-address, token-id: token-id })
+      listing
+      (begin
+        ;; Check if caller is the owner of the listing
+        (asserts! (is-eq tx-sender (get owner listing)) ERR-NOT-OWNER)
+        
+        ;; Delete listing
+        (map-delete listings { contract-address: contract-address, token-id: token-id })
+        
+        ;; Print event
+        (print { event: "nft-unlisted", contract: contract-address, token-id: token-id, owner: tx-sender })
+        (ok true)
+      )
+      ERR-NFT-NOT-LISTED
+    )
+  )
+)
+
+;; Purchase an NFT
+(define-public (purchase-nft (nft-contract <nft-trait>) (token-id uint))
+  (let (
+    (contract-address (contract-of nft-contract))
+  )
+    ;; Check if contract is not paused
+    (asserts! (not (is-paused)) ERR-LISTING-NOT-ACTIVE)
+    
+    ;; Check if NFT is listed
+    (match (map-get? listings { contract-address: contract-address, token-id: token-id })
+      listing
+      (let (
+        (seller (get owner listing))
+        (price (get price listing))
+        (marketplace-fee-amount (calculate-marketplace-fee price))
+        (royalty-amount (calculate-royalty-fee contract-address price))
+        (seller-amount (- price (+ marketplace-fee-amount royalty-amount)))
+      )
+        ;; Check if listing is active
+        (asserts! (get active listing) ERR-LISTING-NOT-ACTIVE)
+        
+        ;; Check if listing has not expired
+        (asserts! (<= block-height (get expiry listing)) ERR-LISTING-EXPIRED)
+        
+        ;; Check if buyer is not the seller
+        (asserts! (not (is-eq tx-sender seller)) ERR-SAME-OWNER)
+        
+        ;; Transfer STX from buyer to marketplace, creator, and seller
+        
+        ;; Transfer marketplace fee
+        (unwrap! (stx-transfer? marketplace-fee-amount tx-sender (var-get treasury)) ERR-STX-TRANSFER-FAILED)
+        
+        ;; Transfer royalty fee to creator if collection is registered
+        (if (is-registered contract-address)
+          (let ((collection (unwrap! (map-get? collections { contract-address: contract-address }) ERR-COLLECTION-NOT-REGISTERED)))
+            (unwrap! (stx-transfer? royalty-amount tx-sender (get creator collection)) ERR-STX-TRANSFER-FAILED)
+          )
+          true
+        )
+        
+        ;; Transfer remaining amount to seller
+        (unwrap! (stx-transfer? seller-amount tx-sender seller) ERR-STX-TRANSFER-FAILED)
+        
+        ;; Transfer NFT from seller to buyer
+        (unwrap! (contract-call? nft-contract transfer token-id seller tx-sender) ERR-NFT-TRANSFER-FAILED)
+        
+        ;; Record sale in history
+        (let ((sale-id (increment-sales-count contract-address token-id)))
+          (map-set sales-history
+            { contract-address: contract-address, token-id: token-id, sale-id: sale-id }
+            {
+              seller: seller,
+              buyer: tx-sender,
+              price: price,
+              royalty-amount: royalty-amount,
+              marketplace-fee: marketplace-fee-amount,
+              block-height: block-height,
+              tx-id: tx-hash
+            }
+          )
+        )
+        
+        ;; Remove listing
+        (map-delete listings { contract-address: contract-address, token-id: token-id })
+        
+        ;; Print event
+        (print { event: "nft-sold", contract: contract-address, token-id: token-id, seller: seller, buyer: tx-sender, price: price })
+        (ok true)
+      )
+      ERR-NFT-NOT-LISTED
+    )
+  )
+)
