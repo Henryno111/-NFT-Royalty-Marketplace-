@@ -467,3 +467,245 @@
     )
   )
 )
+;; Offer Management Functions
+
+;; Make an offer on an NFT
+(define-public (make-offer (nft-contract <nft-trait>) (token-id uint) (amount uint) (expiry (optional uint)))
+  (let (
+    (contract-address (contract-of nft-contract))
+    (owner (unwrap! (contract-call? nft-contract get-owner token-id) ERR-NFT-TRANSFER-FAILED))
+    (expire-at (default-to (+ block-height DEFAULT-EXPIRY) expiry))
+  )
+    ;; Check if contract is not paused
+    (asserts! (not (is-paused)) ERR-LISTING-NOT-ACTIVE)
+    
+    ;; Check if offer amount is valid
+    (asserts! (> amount u0) ERR-INVALID-PRICE)
+    
+    ;; Check if expiry is valid
+    (asserts! (> expire-at block-height) ERR-INVALID-EXPIRY)
+    
+    ;; Check if buyer is not the owner
+    (asserts! (not (is-eq tx-sender (unwrap! owner ERR-NOT-OWNER))) ERR-SAME-OWNER)
+    
+    ;; Create or update offer
+    (map-set offers
+      { contract-address: contract-address, token-id: token-id, buyer: tx-sender }
+      {
+        amount: amount,
+        expiry: expire-at,
+        created-at: block-height
+      }
+    )
+    
+    ;; Print event
+    (print { event: "offer-made", contract: contract-address, token-id: token-id, buyer: tx-sender, amount: amount, expiry: expire-at })
+    (ok true)
+  )
+)
+
+;; Cancel an offer
+(define-public (cancel-offer (nft-contract <nft-trait>) (token-id uint))
+  (let (
+    (contract-address (contract-of nft-contract))
+  )
+    ;; Check if offer exists
+    (match (map-get? offers { contract-address: contract-address, token-id: token-id, buyer: tx-sender })
+      offer
+      (begin
+        ;; Delete offer
+        (map-delete offers { contract-address: contract-address, token-id: token-id, buyer: tx-sender })
+        
+        ;; Print event
+        (print { event: "offer-cancelled", contract: contract-address, token-id: token-id, buyer: tx-sender })
+        (ok true)
+      )
+      ERR-OFFER-NOT-FOUND
+    )
+  )
+)
+
+;; Accept an offer
+(define-public (accept-offer (nft-contract <nft-trait>) (token-id uint) (buyer principal))
+  (let (
+    (contract-address (contract-of nft-contract))
+    (owner (unwrap! (contract-call? nft-contract get-owner token-id) ERR-NFT-TRANSFER-FAILED))
+  )
+    ;; Check if contract is not paused
+    (asserts! (not (is-paused)) ERR-LISTING-NOT-ACTIVE)
+    
+    ;; Check if caller is the owner of the NFT
+    (asserts! (is-eq tx-sender (unwrap! owner ERR-NOT-OWNER)) ERR-NOT-OWNER)
+    
+    ;; Check if offer exists
+    (match (map-get? offers { contract-address: contract-address, token-id: token-id, buyer: buyer })
+      offer
+      (let (
+        (amount (get amount offer))
+        (expiry (get expiry offer))
+        (marketplace-fee-amount (calculate-marketplace-fee amount))
+        (royalty-amount (calculate-royalty-fee contract-address amount))
+        (seller-amount (- amount (+ marketplace-fee-amount royalty-amount)))
+      )
+        ;; Check if offer has not expired
+        (asserts! (<= block-height expiry) ERR-OFFER-EXPIRED)
+        
+        ;; Transfer STX from buyer to marketplace, creator, and seller
+        
+        ;; Transfer marketplace fee
+        (unwrap! (stx-transfer? marketplace-fee-amount buyer (var-get treasury)) ERR-STX-TRANSFER-FAILED)
+        
+        ;; Transfer royalty fee to creator if collection is registered
+        (if (is-registered contract-address)
+          (let ((collection (unwrap! (map-get? collections { contract-address: contract-address }) ERR-COLLECTION-NOT-REGISTERED)))
+            (unwrap! (stx-transfer? royalty-amount buyer (get creator collection)) ERR-STX-TRANSFER-FAILED)
+          )
+          true
+        )
+        
+        ;; Transfer remaining amount to seller
+        (unwrap! (stx-transfer? seller-amount buyer tx-sender) ERR-STX-TRANSFER-FAILED)
+        
+        ;; Transfer NFT from seller to buyer
+        (unwrap! (contract-call? nft-contract transfer token-id tx-sender buyer) ERR-NFT-TRANSFER-FAILED)
+        
+        ;; Record sale in history
+        (let ((sale-id (increment-sales-count contract-address token-id)))
+          (map-set sales-history
+            { contract-address: contract-address, token-id: token-id, sale-id: sale-id }
+            {
+              seller: tx-sender,
+              buyer: buyer,
+              price: amount,
+              royalty-amount: royalty-amount,
+              marketplace-fee: marketplace-fee-amount,
+              block-height: block-height,
+              tx-id: tx-hash
+            }
+          )
+        )
+        
+        ;; Remove offer
+        (map-delete offers { contract-address: contract-address, token-id: token-id, buyer: buyer })
+        
+        ;; Remove listing if exists
+        (map-delete listings { contract-address: contract-address, token-id: token-id })
+        
+        ;; Print event
+        (print { event: "offer-accepted", contract: contract-address, token-id: token-id, seller: tx-sender, buyer: buyer, amount: amount })
+        (ok true)
+      )
+      ERR-OFFER-NOT-FOUND
+    )
+  )
+)
+
+;; Admin Functions
+
+;; Set marketplace fee
+(define-public (set-marketplace-fee (new-fee uint))
+  (begin
+    ;; Check if caller is the contract owner
+    (asserts! (is-owner) ERR-NOT-AUTHORIZED)
+    
+    ;; Check if fee is valid (less than 10%)
+    (asserts! (< new-fee u100) ERR-INVALID-PRICE)
+    
+    ;; Update fee
+    (var-set marketplace-fee new-fee)
+    (ok true)
+  )
+)
+
+;; Set treasury address
+(define-public (set-treasury (new-treasury principal))
+  (begin
+    ;; Check if caller is the contract owner
+    (asserts! (is-owner) ERR-NOT-AUTHORIZED)
+    
+    ;; Update treasury
+    (var-set treasury new-treasury)
+    (ok true)
+  )
+)
+
+;; Transfer contract ownership
+(define-public (set-contract-owner (new-owner principal))
+  (begin
+    ;; Check if caller is the contract owner
+    (asserts! (is-owner) ERR-NOT-AUTHORIZED)
+    
+    ;; Update owner
+    (var-set contract-owner new-owner)
+    (ok true)
+  )
+)
+
+;; Pause or unpause the contract
+(define-public (set-paused (new-paused bool))
+  (begin
+    ;; Check if caller is the contract owner
+    (asserts! (is-owner) ERR-NOT-AUTHORIZED)
+    
+    ;; Update paused status
+    (var-set paused new-paused)
+    (ok true)
+  )
+)
+
+;; Read-only Functions
+
+;; Get collection details
+(define-read-only (get-collection (contract-address principal))
+  (map-get? collections { contract-address: contract-address })
+)
+
+;; Get listing details
+(define-read-only (get-listing (contract-address principal) (token-id uint))
+  (map-get? listings { contract-address: contract-address, token-id: token-id })
+)
+
+;; Get offer details
+(define-read-only (get-offer (contract-address principal) (token-id uint) (buyer principal))
+  (map-get? offers { contract-address: contract-address, token-id: token-id, buyer: buyer })
+)
+
+;; Get sale details
+(define-read-only (get-sale (contract-address principal) (token-id uint) (sale-id uint))
+  (map-get? sales-history { contract-address: contract-address, token-id: token-id, sale-id: sale-id })
+)
+
+;; Get total sales for an NFT
+(define-read-only (get-total-sales (contract-address principal) (token-id uint))
+  (get-sales-count contract-address token-id)
+)
+
+;; Get marketplace-fee
+(define-read-only (get-marketplace-fee)
+  (var-get marketplace-fee)
+)
+
+;; Get treasury address
+(define-read-only (get-treasury)
+  (var-get treasury)
+)
+
+;; Get contract owner
+(define-read-only (get-contract-owner)
+  (var-get contract-owner)
+)
+
+;; Get pause status
+(define-read-only (get-paused)
+  (var-get paused)
+)
+
+;; Get collection count
+(define-read-only (get-collection-count)
+  (var-get collection-count)
+)
+
+;; Get collection by index
+(define-read-only (get-collection-by-index (index uint))
+  (map-get? registered-collections { index: index })
+)
